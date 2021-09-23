@@ -32,7 +32,7 @@ import { isPathALoop } from "../math";
 import rough from "roughjs/bin/rough";
 import { Zoom } from "../types";
 import { getDefaultAppState } from "../appState";
-import getFreeDrawShape from "perfect-freehand";
+import { getStroke, StrokeOptions } from "perfect-freehand";
 import { MAX_DECIMALS_FOR_SVG_EXPORT } from "../constants";
 
 const defaultAppState = getDefaultAppState();
@@ -102,8 +102,8 @@ const generateElementCanvas = (
       padding * zoom.value * 2;
   }
 
+  context.save();
   context.translate(padding * zoom.value, padding * zoom.value);
-
   context.scale(
     window.devicePixelRatio * zoom.value,
     window.devicePixelRatio * zoom.value,
@@ -112,12 +112,7 @@ const generateElementCanvas = (
   const rc = rough.canvas(canvas);
 
   drawElementOnCanvas(element, rc, context);
-
-  context.translate(-(padding * zoom.value), -(padding * zoom.value));
-  context.scale(
-    1 / (window.devicePixelRatio * zoom.value),
-    1 / (window.devicePixelRatio * zoom.value),
-  );
+  context.restore();
   return {
     element,
     canvas,
@@ -175,11 +170,9 @@ const drawElementOnCanvas = (
           document.body.appendChild(context.canvas);
         }
         context.canvas.setAttribute("dir", rtl ? "rtl" : "ltr");
-        const font = context.font;
+        context.save();
         context.font = getFontString(element);
-        const fillStyle = context.fillStyle;
         context.fillStyle = element.strokeColor;
-        const textAlign = context.textAlign;
         context.textAlign = element.textAlign as CanvasTextAlign;
 
         // Canvas does not support multiline text by default
@@ -199,9 +192,7 @@ const drawElementOnCanvas = (
             (index + 1) * lineHeight - verticalOffset,
           );
         }
-        context.fillStyle = fillStyle;
-        context.font = font;
-        context.textAlign = textAlign;
+        context.restore();
         if (shouldTemporarilyAttach) {
           context.canvas.remove();
         }
@@ -518,6 +509,7 @@ const drawElementFromCanvas = (
 
   const cx = ((x1 + x2) / 2 + sceneState.scrollX) * window.devicePixelRatio;
   const cy = ((y1 + y2) / 2 + sceneState.scrollY) * window.devicePixelRatio;
+  context.save();
   context.scale(1 / window.devicePixelRatio, 1 / window.devicePixelRatio);
   context.translate(cx, cy);
   context.rotate(element.angle);
@@ -531,9 +523,7 @@ const drawElementFromCanvas = (
     elementWithCanvas.canvas!.width / elementWithCanvas.canvasZoom,
     elementWithCanvas.canvas!.height / elementWithCanvas.canvasZoom,
   );
-  context.rotate(-element.angle);
-  context.translate(-cx, -cy);
-  context.scale(window.devicePixelRatio, window.devicePixelRatio);
+  context.restore();
 
   // Clear the nested element we appended to the DOM
 };
@@ -548,18 +538,14 @@ export const renderElement = (
   const generator = rc.generator;
   switch (element.type) {
     case "selection": {
+      context.save();
       context.translate(
         element.x + sceneState.scrollX,
         element.y + sceneState.scrollY,
       );
-      const fillStyle = context.fillStyle;
       context.fillStyle = "rgba(0, 0, 255, 0.10)";
       context.fillRect(0, 0, element.width, element.height);
-      context.fillStyle = fillStyle;
-      context.translate(
-        -element.x - sceneState.scrollX,
-        -element.y - sceneState.scrollY,
-      );
+      context.restore();
       break;
     }
     case "freedraw": {
@@ -577,13 +563,12 @@ export const renderElement = (
         const cy = (y1 + y2) / 2 + sceneState.scrollY;
         const shiftX = (x2 - x1) / 2 - (element.x - x1);
         const shiftY = (y2 - y1) / 2 - (element.y - y1);
+        context.save();
         context.translate(cx, cy);
         context.rotate(element.angle);
         context.translate(-shiftX, -shiftY);
         drawElementOnCanvas(element, rc, context);
-        context.translate(shiftX, shiftY);
-        context.rotate(-element.angle);
-        context.translate(-cx, -cy);
+        context.restore();
       }
 
       break;
@@ -607,13 +592,12 @@ export const renderElement = (
         const cy = (y1 + y2) / 2 + sceneState.scrollY;
         const shiftX = (x2 - x1) / 2 - (element.x - x1);
         const shiftY = (y2 - y1) / 2 - (element.y - y1);
+        context.save();
         context.translate(cx, cy);
         context.rotate(element.angle);
         context.translate(-shiftX, -shiftY);
         drawElementOnCanvas(element, rc, context);
-        context.translate(shiftX, shiftY);
-        context.rotate(-element.angle);
-        context.translate(-cx, -cy);
+        context.restore();
       }
       break;
     }
@@ -805,40 +789,55 @@ export function getFreeDrawPath2D(element: ExcalidrawFreeDrawElement) {
 }
 
 export function getFreeDrawSvgPath(element: ExcalidrawFreeDrawElement) {
+  // If input points are empty (should they ever be?) return a dot
   const inputPoints = element.simulatePressure
     ? element.points
     : element.points.length
     ? element.points.map(([x, y], i) => [x, y, element.pressures[i]])
-    : [[0, 0, 0]];
+    : [[0, 0, 0.5]];
 
   // Consider changing the options for simulated pressure vs real pressure
-  const options = {
+  const options: StrokeOptions = {
     simulatePressure: element.simulatePressure,
-    size: element.strokeWidth * 6,
-    thinning: 0.5,
+    size: element.strokeWidth * 4.25,
+    thinning: 0.6,
     smoothing: 0.5,
     streamline: 0.5,
-    easing: (t: number) => t * (2 - t),
-    last: true,
+    easing: (t) => Math.sin((t * Math.PI) / 2), // https://easings.net/#easeOutSine
+    last: false,
   };
 
-  const points = getFreeDrawShape(inputPoints as number[][], options);
-  const d: (string | number)[] = [];
+  return getSvgPathFromStroke(getStroke(inputPoints as number[][], options));
+}
 
-  let [p0, p1] = points;
+function med(A: number[], B: number[]) {
+  return [(A[0] + B[0]) / 2, (A[1] + B[1]) / 2];
+}
 
-  d.push("M", p0[0], p0[1], "Q");
+// Trim SVG path data so number are each two decimal points. This
+// improves SVG exports, and prevents rendering errors on points
+// with long decimals.
+const TO_FIXED_PRECISION = /(\s?[A-Z]?,?-?[0-9]*\.[0-9]{0,2})(([0-9]|e|-)*)/g;
 
-  for (let i = 0; i < points.length; i++) {
-    d.push(p0[0], p0[1], (p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2);
-    p0 = p1;
-    p1 = points[i];
+function getSvgPathFromStroke(points: number[][]): string {
+  if (!points.length) {
+    return "";
   }
 
-  p1 = points[0];
-  d.push(p0[0], p0[1], (p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2);
+  const max = points.length - 1;
 
-  d.push("Z");
-
-  return d.join(" ");
+  return points
+    .reduce(
+      (acc, point, i, arr) => {
+        if (i === max) {
+          acc.push(point, med(point, arr[0]), "L", arr[0], "Z");
+        } else {
+          acc.push(point, med(point, arr[i + 1]));
+        }
+        return acc;
+      },
+      ["M", points[0], "Q"],
+    )
+    .join(" ")
+    .replaceAll(TO_FIXED_PRECISION, "$1");
 }
